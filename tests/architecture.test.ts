@@ -35,6 +35,9 @@ describe("provider-neutral architecture", () => {
       /from\s+["']node:(?:fs|http|https|net)[^"']*["']/u,
       /\bprocess\.env\b/u,
       /\bfetch\s*\(/u,
+      /\bformatEmbedMarkup\b/u,
+      /\bescapeUntrustedEmbedText\b/u,
+      /\ballowedProtocols\b/u,
     ]) {
       assert.doesNotMatch(source, forbidden);
     }

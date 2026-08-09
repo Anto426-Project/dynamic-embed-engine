@@ -6,7 +6,6 @@ import {
   deriveDynamicColorProfile,
   dynamicColorPolicy,
   embedColorToRgb,
-  firstDefinedHttpsSource,
   resolveDynamicColor,
   rgbToEmbedColor,
 } from "../src/index.js";
@@ -34,6 +33,25 @@ describe("dynamic color engine", () => {
     assert.equal(rgbToEmbedColor([0x12, 0x34, 0x56]), 0x12_34_56);
     assert.equal(blendEmbedColors(0x00_00_00, 0xff_ff_ff, 0.5), 0x80_80_80);
     assert.throws(() => blendEmbedColors(0, 0, 2), /between 0 and 1/);
+    assert.throws(() => rgbToEmbedColor([256, 0, 0]), /between 0 and 255/);
+    assert.throws(() => rgbToEmbedColor([-1, 0, 0]), /between 0 and 255/);
+    assert.throws(() => rgbToEmbedColor([Number.NaN, 0, 0]), /between 0 and 255/);
+  });
+
+  it("derives one representative profile independently of sample order", () => {
+    const samples = [
+      [79, 98, 14],
+      [235, 53, 3],
+      [36, 71, 216],
+      [76, 154, 239],
+      [14, 173, 95],
+    ] as const;
+    const reordered = [samples[2], samples[0], samples[4], samples[1], samples[3]];
+    const first = deriveDynamicColorProfile(samples);
+    const second = deriveDynamicColorProfile(reordered);
+
+    assert.deepEqual(first, second);
+    assert.ok(new Set(first.palette.map((color) => color.join(","))).size > 1);
   });
 
   it("resolves profile and contextual color without provider state", () => {
@@ -57,6 +75,27 @@ describe("dynamic color engine", () => {
     assert.throws(() => deriveDynamicColorProfile([]), /between 1 and/);
     assert.throws(() => deriveDynamicColorProfile([[1, 2]]), /exactly three/);
     assert.throws(() => deriveDynamicColorProfile([[1, 2, 999]]), /between 0 and 255/);
+    assert.throws(
+      () => deriveDynamicColorProfile(new Array(10_001) as number[][]),
+      /between 1 and/,
+    );
+
+    const samples = [[1, 2, 3]];
+    Object.defineProperty(samples, "map", {
+      value: () => {
+        throw new Error("overridden map must not run");
+      },
+    });
+    assert.equal(deriveDynamicColorProfile(samples).averageColor, 0x01_02_03);
+
+    const accessorSample = [1, 2, 3];
+    Object.defineProperty(accessorSample, "0", {
+      enumerable: true,
+      get: () => {
+        throw new Error("RGB accessor must not run");
+      },
+    });
+    assert.throws(() => deriveDynamicColorProfile([accessorSample]), /dense numeric data/);
   });
 
   it("bounds palette selection work to the requested color count", () => {
@@ -74,14 +113,4 @@ describe("dynamic color engine", () => {
     assert.ok(performance.now() - started < 1_000);
   });
 
-  it("selects only credential-free HTTPS sources", () => {
-    assert.equal(
-      firstDefinedHttpsSource([
-        "http://unsafe.example/image.png",
-        "https://user:pass@example.test/private.png",
-        "https://cdn.example.test/image.png",
-      ]),
-      "https://cdn.example.test/image.png",
-    );
-  });
 });

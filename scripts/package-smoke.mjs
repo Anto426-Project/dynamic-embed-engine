@@ -6,12 +6,16 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const temporaryRoot = mkdtempSync(join(tmpdir(), "dynamic-embed-engine-smoke-"));
-const excluded = new Set([".git", "dist", "node_modules"]);
+const excluded = new Set([".git", "node_modules"]);
 const probe = `
-  import { EmbedPlanBuilder, deriveDynamicColorProfile } from "@anto-project/dynamic-embed-engine";
+  import * as engine from "@anto-project/dynamic-embed-engine";
+  const { EmbedPlanBuilder, deriveDynamicColorProfile, validateEmbedPlan } = engine;
   const profile = deriveDynamicColorProfile([[12, 34, 56]]);
   const plan = EmbedPlanBuilder.info().dynamicColor({}, { source: "profile", profile, blendRatio: 0 }).description("ok").build();
   if (plan.color !== profile.averageColor) process.exit(10);
+  if (plan.locale !== "und") process.exit(11);
+  if (validateEmbedPlan({ ...plan }).description !== "ok") process.exit(12);
+  if ("formatEmbedMarkup" in engine || "escapeUntrustedEmbedText" in engine) process.exit(13);
 `;
 
 const installAndProbe = (name, target) => {
@@ -35,10 +39,9 @@ try {
     recursive: true,
     filter: (source) => !excluded.has(relative(projectRoot, source).split(sep)[0]),
   });
-  execFileSync("npm", ["ci", "--no-audit", "--no-fund"], {
-    cwd: cleanSource,
-    stdio: "pipe",
-  });
+  if (!readFileSync(join(cleanSource, "dist", "index.js"), "utf8").includes("export")) {
+    throw new Error("A clean source checkout must contain its prebuilt entry point.");
+  }
   installAndProbe("source-consumer", cleanSource);
 
   const packed = JSON.parse(
@@ -54,6 +57,9 @@ try {
   const paths = new Set(result.files.map((entry) => entry.path));
   for (const required of ["dist/index.js", "dist/index.d.ts", "README.md"]) {
     if (!paths.has(required)) throw new Error(`Packed artifact is missing ${required}.`);
+  }
+  for (const forbidden of ["dist/markup.js", "dist/markup.d.ts", "src/markup.ts"]) {
+    if (paths.has(forbidden)) throw new Error(`Packed artifact contains provider markup: ${forbidden}.`);
   }
   installAndProbe("tarball-consumer", join(temporaryRoot, result.filename));
 

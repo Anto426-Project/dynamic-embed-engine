@@ -75,18 +75,64 @@ const assertChannel = (value: number, path: string): number => {
 };
 
 const freezeRgb = (color: readonly number[], path: string): RgbColor => {
-  if (color.length !== 3) {
+  if (!Array.isArray(color) || Object.getPrototypeOf(color) !== Array.prototype) {
+    throw new TypeError(`${path} must be a plain RGB data array.`);
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(color, "length");
+  if (lengthDescriptor?.value !== 3) {
     throw new RangeError(`${path} must contain exactly three RGB channels.`);
   }
+  const channels: number[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(color, String(index));
+    if (
+      descriptor === undefined ||
+      descriptor.get !== undefined ||
+      descriptor.set !== undefined ||
+      descriptor.enumerable !== true ||
+      typeof descriptor.value !== "number"
+    ) {
+      throw new TypeError(`${path} must contain three dense numeric data channels.`);
+    }
+    channels.push(assertChannel(descriptor.value, `${path}.${["red", "green", "blue"][index]}`));
+  }
   return Object.freeze([
-    assertChannel(color[0] as number, `${path}.red`),
-    assertChannel(color[1] as number, `${path}.green`),
-    assertChannel(color[2] as number, `${path}.blue`),
+    channels[0] as number,
+    channels[1] as number,
+    channels[2] as number,
   ]);
 };
 
-export const rgbToEmbedColor = (color: RgbColor): number =>
-  (color[0] << 16) | (color[1] << 8) | color[2];
+const freezeSamples = (samples: readonly (readonly number[])[]): readonly RgbColor[] => {
+  if (!Array.isArray(samples) || Object.getPrototypeOf(samples) !== Array.prototype) {
+    throw new TypeError("RGB samples must be a plain data array.");
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(samples, "length");
+  const length = lengthDescriptor?.value;
+  if (!Number.isSafeInteger(length) || length < 1 || length > MAX_SAMPLES) {
+    throw new RangeError(`RGB samples must contain between 1 and ${MAX_SAMPLES} entries.`);
+  }
+  const normalized: RgbColor[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(samples, String(index));
+    if (
+      descriptor === undefined ||
+      descriptor.get !== undefined ||
+      descriptor.set !== undefined ||
+      descriptor.enumerable !== true ||
+      !Array.isArray(descriptor.value)
+    ) {
+      throw new TypeError("RGB samples must be a dense array of plain RGB data arrays.");
+    }
+    normalized.push(freezeRgb(descriptor.value, `samples[${index}]`));
+  }
+  return Object.freeze(normalized);
+};
+
+export const rgbToEmbedColor = (color: RgbColor): number => {
+  const normalized = freezeRgb(color, "color");
+  return (normalized[0] << 16) | (normalized[1] << 8) | normalized[2];
+};
 
 export const embedColorToRgb = (color: number): RgbColor => {
   assertEmbedColor(color);
@@ -111,38 +157,85 @@ const colorDistance = (left: RgbColor, right: RgbColor): number =>
       (left[2] - right[2]) ** 2,
   );
 
-const averageDistance = (palette: readonly RgbColor[]): number => {
-  if (palette.length < 2) return 0;
-  let total = 0;
-  for (let index = 0; index < palette.length - 1; index += 1) {
-    const current = palette[index];
-    const next = palette[index + 1];
-    if (current !== undefined && next !== undefined) {
-      total += colorDistance(current, next);
-    }
-  }
-  return Math.round(total / (palette.length - 1));
-};
+const compareRgb = (left: RgbColor, right: RgbColor): number =>
+  brightness(left) - brightness(right) ||
+  left[0] - right[0] ||
+  left[1] - right[1] ||
+  left[2] - right[2];
 
 const sortedByBrightness = (palette: readonly RgbColor[]): readonly RgbColor[] =>
-  [...palette].sort((left, right) => brightness(left) - brightness(right));
+  [...palette].sort(compareRgb);
+
+const uniqueColors = (palette: readonly RgbColor[]): readonly RgbColor[] => {
+  const seen = new Set<string>();
+  return Object.freeze(
+    sortedByBrightness(palette).filter((color) => {
+      const key = `${color[0]},${color[1]},${color[2]}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+  );
+};
+
+const defaultMinimumDistance = (palette: readonly RgbColor[]): number => {
+  if (palette.length < 2) return 0;
+  const ordered = sortedByBrightness(palette);
+  const totals = ordered.reduce(
+    (sum, color) => [sum[0] + color[0], sum[1] + color[1], sum[2] + color[2]],
+    [0, 0, 0],
+  );
+  const center = Object.freeze([
+    totals[0] / ordered.length,
+    totals[1] / ordered.length,
+    totals[2] / ordered.length,
+  ]) as RgbColor;
+  return Math.round(
+    ordered.reduce((total, color) => total + colorDistance(color, center), 0) / ordered.length,
+  );
+};
 
 const distinctColors = (
   palette: readonly RgbColor[],
   minimumDistance: number,
   maximumCount: number,
 ): readonly RgbColor[] => {
-  const sorted = sortedByBrightness(palette);
+  const sorted = uniqueColors(palette);
   const first = sorted[0];
   if (first === undefined) return Object.freeze([]);
-  const selected: RgbColor[] = [first];
-  for (const candidate of sorted.slice(1)) {
-    if (selected.every((existing) => colorDistance(candidate, existing) >= minimumDistance)) {
-      selected.push(candidate);
-      if (selected.length >= maximumCount) break;
-    }
+  if (maximumCount === 1) {
+    const average = averageColor(sorted);
+    const closest = [...sorted].sort(
+      (left, right) =>
+        colorDistance(left, average) - colorDistance(right, average) || compareRgb(left, right),
+    )[0] as RgbColor;
+    return Object.freeze([closest]);
   }
-  return Object.freeze(selected);
+
+  const selected: RgbColor[] = [first];
+  const selectedKeys = new Set([`${first[0]},${first[1]},${first[2]}`]);
+  while (selected.length < maximumCount) {
+    let best: RgbColor | undefined;
+    let bestDistance = -1;
+    for (const candidate of sorted) {
+      const key = `${candidate[0]},${candidate[1]},${candidate[2]}`;
+      if (selectedKeys.has(key)) continue;
+      const distance = Math.min(
+        ...selected.map((existing) => colorDistance(candidate, existing)),
+      );
+      if (
+        distance > bestDistance ||
+        (distance === bestDistance && best !== undefined && compareRgb(candidate, best) < 0)
+      ) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+    if (best === undefined || bestDistance < minimumDistance) break;
+    selected.push(best);
+    selectedKeys.add(`${best[0]},${best[1]},${best[2]}`);
+  }
+  return Object.freeze(sortedByBrightness(selected));
 };
 
 const interpolate = (start: RgbColor, end: RgbColor, ratio: number): RgbColor =>
@@ -152,18 +245,25 @@ const interpolate = (start: RgbColor, end: RgbColor, ratio: number): RgbColor =>
     Math.round(start[2] + (end[2] - start[2]) * ratio),
   ]);
 
-const gradient = (
-  start: RgbColor,
-  end: RgbColor,
+const gradientThrough = (
+  controlPoints: readonly RgbColor[],
   count: number,
-): readonly RgbColor[] =>
-  count === 1
-    ? Object.freeze([start])
-    : Object.freeze(
-        Array.from({ length: count }, (_, index) =>
-          interpolate(start, end, index / (count - 1)),
-        ),
+): readonly RgbColor[] => {
+  if (controlPoints.length === 1) {
+    return Object.freeze(Array.from({ length: count }, () => controlPoints[0] as RgbColor));
+  }
+  return Object.freeze(
+    Array.from({ length: count }, (_, index) => {
+      const position = (index / (count - 1)) * (controlPoints.length - 1);
+      const segment = Math.min(Math.floor(position), controlPoints.length - 2);
+      return interpolate(
+        controlPoints[segment] as RgbColor,
+        controlPoints[segment + 1] as RgbColor,
+        position - segment,
       );
+    }),
+  );
+};
 
 const averageColor = (palette: readonly RgbColor[]): RgbColor => {
   const totals = palette.reduce(
@@ -270,29 +370,27 @@ export const deriveDynamicColorProfile = (
   samples: readonly (readonly number[])[],
   options: DeriveDynamicColorOptions = {},
 ): DynamicColorProfile => {
-  if (samples.length === 0 || samples.length > MAX_SAMPLES) {
-    throw new RangeError(`RGB samples must contain between 1 and ${MAX_SAMPLES} entries.`);
-  }
   const colorCount = options.colorCount ?? DEFAULT_COLOR_COUNT;
   if (!Number.isInteger(colorCount) || colorCount < 1 || colorCount > 20) {
     throw new RangeError("colorCount must be an integer from 1 to 20.");
   }
-  const normalized = Object.freeze(
-    samples.map((sample, index) => freezeRgb(sample, `samples[${index}]`)),
-  );
-  const minimumDistance = options.minimumDistance ?? averageDistance(normalized);
+  const normalized = freezeSamples(samples);
+  const minimumDistance = options.minimumDistance ?? defaultMinimumDistance(normalized);
   if (!Number.isFinite(minimumDistance) || minimumDistance < 0 || minimumDistance > 442) {
     throw new RangeError("minimumDistance must be between 0 and 442.");
   }
 
   const distinct = distinctColors(normalized, minimumDistance, colorCount);
-  const sorted = sortedByBrightness(distinct.length === 0 ? normalized : distinct);
-  const darkest = sorted[0] as RgbColor;
-  const lightest = sorted.at(-1) as RgbColor;
-  const finalPalette =
-    distinct.length >= colorCount
-      ? Object.freeze(distinct.slice(0, colorCount))
-      : gradient(darkest, lightest, colorCount);
+  const unique = uniqueColors(normalized);
+  const finalPalette = (() => {
+    if (colorCount === 1) return Object.freeze([averageColor(normalized)]);
+    if (distinct.length >= colorCount) return Object.freeze(distinct.slice(0, colorCount));
+    const controlPoints =
+      distinct.length >= 2
+        ? sortedByBrightness(distinct)
+        : Object.freeze([unique[0] as RgbColor, unique.at(-1) as RgbColor]);
+    return gradientThrough(controlPoints, colorCount);
+  })();
   const average = averageColor(finalPalette);
   const accent =
     [...finalPalette].sort((left, right) => rgbToHsl(right)[1] - rgbToHsl(left)[1])[0] ??
@@ -357,25 +455,3 @@ export const dynamicColorPolicy = (
   profile === null
     ? Object.freeze({ source: "theme" })
     : Object.freeze({ source: "profile", profile, blendRatio });
-
-export const firstDefinedHttpsSource = (
-  sources: readonly (string | null | undefined)[],
-): string | undefined => {
-  for (const value of sources) {
-    if (value === null || value === undefined || value.trim().length === 0) continue;
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      continue;
-    }
-    if (
-      parsed.protocol === "https:" &&
-      parsed.username.length === 0 &&
-      parsed.password.length === 0
-    ) {
-      return parsed.toString();
-    }
-  }
-  return undefined;
-};

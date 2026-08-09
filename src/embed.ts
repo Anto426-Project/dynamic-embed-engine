@@ -18,11 +18,11 @@ export type EmbedTheme = (typeof EMBED_THEMES)[number];
 export type EmbedThemePalette = Readonly<Record<EmbedTheme, number>>;
 
 export const DEFAULT_EMBED_THEME_COLORS: EmbedThemePalette = Object.freeze({
-  info: 0x00_e5_ff,
-  success: 0x00_f5_a0,
-  warning: 0xff_b0_00,
-  error: 0xff_38_60,
-  neutral: 0x1a_1b_26,
+  info: 0x3b_82_f6,
+  success: 0x22_c5_5e,
+  warning: 0xf5_9e_0b,
+  error: 0xef_44_44,
+  neutral: 0x64_74_8b,
 });
 
 export const EMBED_LIMITS = Object.freeze({
@@ -75,6 +75,7 @@ export type EmbedValidationCode =
   | "EMBED_FIELD_LIMIT_EXCEEDED"
   | "EMBED_TOTAL_TEXT_LIMIT_EXCEEDED"
   | "EMBED_INVALID_COLOR"
+  | "EMBED_INVALID_FIELD"
   | "EMBED_INVALID_LOCALE"
   | "EMBED_INVALID_TIMESTAMP"
   | "EMBED_INVALID_URL"
@@ -96,8 +97,11 @@ export class EmbedValidationError extends Error {
 }
 
 export interface EmbedUrlPolicy {
-  readonly allowedProtocols: readonly string[];
   readonly allowedHosts?: readonly string[];
+}
+
+export interface EmbedPlanValidationOptions {
+  readonly urlPolicy?: EmbedUrlPolicy;
 }
 
 export interface EmbedBuilderOptions {
@@ -122,28 +126,60 @@ interface EmbedDraft {
   readonly fields: readonly EmbedField[];
 }
 
-const DEFAULT_URL_POLICY: EmbedUrlPolicy = Object.freeze({
-  allowedProtocols: Object.freeze(["https:"]),
-});
+const DEFAULT_URL_POLICY: EmbedUrlPolicy = Object.freeze({});
+const MAXIMUM_ALLOWED_HOSTS = 256;
+
+const normalizeAllowedHost = (value: string, index: number): string => {
+  const host = value.trim();
+  if (host.length === 0 || host.length > 253 || /[/?#]/u.test(host)) {
+    throw new TypeError(`Embed URL policy host ${index} is invalid.`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(`https://${host}/`);
+  } catch {
+    throw new TypeError(`Embed URL policy host ${index} is invalid.`);
+  }
+  if (
+    parsed.hostname.length === 0 ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.port.length > 0 ||
+    parsed.pathname !== "/" ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    throw new TypeError(`Embed URL policy host ${index} is invalid.`);
+  }
+  return parsed.hostname.toLowerCase();
+};
 
 const freezePolicy = (policy: EmbedUrlPolicy): EmbedUrlPolicy => {
-  if (policy.allowedProtocols.length === 0) {
-    throw new TypeError("Embed URL policy requires at least one protocol.");
+  const values = policy.allowedHosts;
+  if (values === undefined) return DEFAULT_URL_POLICY;
+  if (!Array.isArray(values) || Object.getPrototypeOf(values) !== Array.prototype) {
+    throw new TypeError("Embed URL policy allowedHosts must be a plain array.");
   }
-  const protocols = Object.freeze(
-    [...new Set(policy.allowedProtocols.map((value) => value.trim().toLowerCase()))],
-  );
-  if (protocols.some((protocol) => !/^[a-z][a-z0-9+.-]*:$/.test(protocol))) {
-    throw new TypeError("Embed URL policy contains an invalid protocol.");
+  if (values.length > MAXIMUM_ALLOWED_HOSTS) {
+    throw new RangeError(
+      `Embed URL policy can contain at most ${MAXIMUM_ALLOWED_HOSTS} allowed hosts.`,
+    );
   }
-  const hosts = policy.allowedHosts?.map((host) => host.trim().toLowerCase());
-  if (hosts?.some((host) => host.length === 0 || host.includes("/")) === true) {
-    throw new TypeError("Embed URL policy contains an invalid host.");
+  const hosts: string[] = [];
+  for (let index = 0; index < values.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+    if (
+      descriptor === undefined ||
+      descriptor.get !== undefined ||
+      descriptor.set !== undefined ||
+      descriptor.enumerable !== true ||
+      typeof descriptor.value !== "string"
+    ) {
+      throw new TypeError("Embed URL policy allowedHosts must be a dense string array.");
+    }
+    hosts.push(normalizeAllowedHost(descriptor.value, index));
   }
-  return Object.freeze({
-    allowedProtocols: protocols,
-    ...(hosts === undefined ? {} : { allowedHosts: Object.freeze([...new Set(hosts)]) }),
-  });
+  return Object.freeze({ allowedHosts: Object.freeze([...new Set(hosts)]) });
 };
 
 const issueForText = (
@@ -164,6 +200,22 @@ const issueForText = (
     };
   }
   return undefined;
+};
+
+const isBoundedLocale = (value: string): boolean => {
+  if (
+    value.length < 2 ||
+    value.length > 64 ||
+    !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/u.test(value)
+  ) {
+    return false;
+  }
+  try {
+    new Intl.Locale(value);
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const normalizeUrl = (
@@ -189,9 +241,20 @@ const normalizeUrl = (
     issues.push({ code: "EMBED_INVALID_URL", path, message: "The value must be an absolute URL." });
     return undefined;
   }
+  const normalized = parsed.toString();
+  if (normalized.length > EMBED_LIMITS.url) {
+    issues.push({
+      code: "EMBED_TEXT_LIMIT_EXCEEDED",
+      path,
+      message: `The normalized URL exceeds the ${EMBED_LIMITS.url} character limit.`,
+      actual: normalized.length,
+      limit: EMBED_LIMITS.url,
+    });
+    return undefined;
+  }
   const normalizedHost = parsed.hostname.toLowerCase();
   const allowed =
-    policy.allowedProtocols.includes(parsed.protocol.toLowerCase()) &&
+    parsed.protocol === "https:" &&
     parsed.username.length === 0 &&
     parsed.password.length === 0 &&
     (policy.allowedHosts === undefined || policy.allowedHosts.includes(normalizedHost));
@@ -203,7 +266,7 @@ const normalizeUrl = (
     });
     return undefined;
   }
-  return parsed.toString();
+  return normalized;
 };
 
 export const calculateEmbedTextLength = (plan: EmbedPlan): number =>
@@ -215,7 +278,7 @@ export const calculateEmbedTextLength = (plan: EmbedPlan): number =>
 
 const validateDraft = (draft: EmbedDraft): EmbedPlan => {
   const issues: EmbedValidationIssue[] = [];
-  if (!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/.test(draft.locale)) {
+  if (!isBoundedLocale(draft.locale)) {
     issues.push({
       code: "EMBED_INVALID_LOCALE",
       path: "locale",
@@ -259,6 +322,13 @@ const validateDraft = (draft: EmbedDraft): EmbedPlan => {
     });
   }
   for (const [index, field] of draft.fields.entries()) {
+    if (typeof field.inline !== "boolean") {
+      issues.push({
+        code: "EMBED_INVALID_FIELD",
+        path: `fields[${index}].inline`,
+        message: "Field inline must be a boolean.",
+      });
+    }
     for (const [value, path, limit] of [
       [field.name, `fields[${index}].name`, EMBED_LIMITS.fieldName],
       [field.value, `fields[${index}].value`, EMBED_LIMITS.fieldValue],
@@ -342,11 +412,39 @@ const validateDraft = (draft: EmbedDraft): EmbedPlan => {
       limit: EMBED_LIMITS.totalText,
     });
   }
-  if (issues.length > 0) throw new EmbedValidationError(Object.freeze(issues));
+  if (issues.length > 0) {
+    throw new EmbedValidationError(
+      Object.freeze(issues.map((issue) => Object.freeze({ ...issue }))),
+    );
+  }
   return Object.freeze(candidate);
 };
 
-const dataRecord = (value: unknown, path: string): Record<string, unknown> => {
+const EMBED_PLAN_KEYS = Object.freeze(
+  new Set([
+    "theme",
+    "locale",
+    "color",
+    "title",
+    "description",
+    "url",
+    "timestamp",
+    "author",
+    "footer",
+    "thumbnailUrl",
+    "imageUrl",
+    "fields",
+  ]),
+);
+const EMBED_AUTHOR_KEYS = Object.freeze(new Set(["name", "url", "iconUrl"]));
+const EMBED_FOOTER_KEYS = Object.freeze(new Set(["text", "iconUrl"]));
+const EMBED_FIELD_KEYS = Object.freeze(new Set(["name", "value", "inline"]));
+
+const dataRecord = (
+  value: unknown,
+  path: string,
+  allowedKeys: ReadonlySet<string>,
+): Record<string, unknown> => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${path} must be a plain data object.`);
   }
@@ -354,12 +452,70 @@ const dataRecord = (value: unknown, path: string): Record<string, unknown> => {
   if (prototype !== Object.prototype && prototype !== null) {
     throw new TypeError(`${path} must be a plain data object.`);
   }
-  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-    if (descriptor.get !== undefined || descriptor.set !== undefined) {
+  const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowedKeys.has(key)) {
+      throw new TypeError(`${path} contains an unknown property.`);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      descriptor === undefined ||
+      descriptor.get !== undefined ||
+      descriptor.set !== undefined ||
+      descriptor.enumerable !== true
+    ) {
       throw new TypeError(`${path} cannot contain accessor properties.`);
     }
+    snapshot[key] = descriptor.value;
   }
-  return value as Record<string, unknown>;
+  return Object.freeze(snapshot);
+};
+
+const boundedDataArray = (
+  value: unknown,
+  path: string,
+  maximumLength: number,
+): readonly unknown[] => {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new TypeError(`${path} must be a plain data array.`);
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (
+    lengthDescriptor === undefined ||
+    typeof lengthDescriptor.value !== "number" ||
+    !Number.isSafeInteger(lengthDescriptor.value)
+  ) {
+    throw new TypeError(`${path} has an invalid length.`);
+  }
+  const length = lengthDescriptor.value;
+  if (length > maximumLength) {
+    throw new EmbedValidationError(
+      Object.freeze([
+        Object.freeze({
+          code: "EMBED_FIELD_LIMIT_EXCEEDED" as const,
+          path,
+          message: `An embed can contain at most ${maximumLength} fields.`,
+          actual: length,
+          limit: maximumLength,
+        }),
+      ]),
+    );
+  }
+
+  const values: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (
+      descriptor === undefined ||
+      descriptor.get !== undefined ||
+      descriptor.set !== undefined ||
+      descriptor.enumerable !== true
+    ) {
+      throw new TypeError(`${path} must be a dense plain data array.`);
+    }
+    values.push(descriptor.value);
+  }
+  return Object.freeze(values);
 };
 
 const requiredString = (record: Record<string, unknown>, key: string, path: string): string => {
@@ -384,8 +540,11 @@ const optionalString = (
  * Provider adapters call this even for TypeScript-typed input so JS callers,
  * casts, getters and custom toJSON behavior cannot bypass engine limits.
  */
-export const validateEmbedPlan = (input: unknown): EmbedPlan => {
-  const plan = dataRecord(input, "embed");
+export const validateEmbedPlan = (
+  input: unknown,
+  options: EmbedPlanValidationOptions = {},
+): EmbedPlan => {
+  const plan = dataRecord(input, "embed", EMBED_PLAN_KEYS);
   const themeValue = requiredString(plan, "theme", "embed");
   if (!EMBED_THEMES.includes(themeValue as EmbedTheme)) {
     throw new TypeError("embed.theme is invalid.");
@@ -393,24 +552,29 @@ export const validateEmbedPlan = (input: unknown): EmbedPlan => {
   const color = plan["color"];
   if (typeof color !== "number") throw new TypeError("embed.color must be a number.");
   const fieldsValue = plan["fields"];
-  if (!Array.isArray(fieldsValue)) throw new TypeError("embed.fields must be an array.");
-  const fields = fieldsValue.map((fieldValue, index): EmbedField => {
-    const field = dataRecord(fieldValue, `embed.fields[${index}]`);
+  const fieldValues = boundedDataArray(fieldsValue, "embed.fields", EMBED_LIMITS.fields);
+  const fields: EmbedField[] = [];
+  for (let index = 0; index < fieldValues.length; index += 1) {
+    const field = dataRecord(
+      fieldValues[index],
+      `embed.fields[${index}]`,
+      EMBED_FIELD_KEYS,
+    );
     if (typeof field["inline"] !== "boolean") {
       throw new TypeError(`embed.fields[${index}].inline must be a boolean.`);
     }
-    return Object.freeze({
+    fields.push(Object.freeze({
       name: requiredString(field, "name", `embed.fields[${index}]`),
       value: requiredString(field, "value", `embed.fields[${index}]`),
       inline: field["inline"],
-    });
-  });
+    }));
+  }
   const authorValue = plan["author"];
   const author =
     authorValue === undefined
       ? undefined
       : (() => {
-          const value = dataRecord(authorValue, "embed.author");
+          const value = dataRecord(authorValue, "embed.author", EMBED_AUTHOR_KEYS);
           return Object.freeze({
             name: requiredString(value, "name", "embed.author"),
             ...(optionalString(value, "url", "embed.author") === undefined
@@ -426,7 +590,7 @@ export const validateEmbedPlan = (input: unknown): EmbedPlan => {
     footerValue === undefined
       ? undefined
       : (() => {
-          const value = dataRecord(footerValue, "embed.footer");
+          const value = dataRecord(footerValue, "embed.footer", EMBED_FOOTER_KEYS);
           return Object.freeze({
             text: requiredString(value, "text", "embed.footer"),
             ...(optionalString(value, "iconUrl", "embed.footer") === undefined
@@ -438,7 +602,7 @@ export const validateEmbedPlan = (input: unknown): EmbedPlan => {
     theme: themeValue as EmbedTheme,
     locale: requiredString(plan, "locale", "embed"),
     color,
-    urlPolicy: DEFAULT_URL_POLICY,
+    urlPolicy: freezePolicy(options.urlPolicy ?? DEFAULT_URL_POLICY),
     ...(optionalString(plan, "title", "embed") === undefined
       ? {}
       : { title: optionalString(plan, "title", "embed") as string }),
@@ -464,7 +628,12 @@ export const validateEmbedPlan = (input: unknown): EmbedPlan => {
 };
 
 export class EmbedPlanBuilder {
-  private constructor(private readonly draft: EmbedDraft) {}
+  readonly #draft: EmbedDraft;
+
+  private constructor(draft: EmbedDraft) {
+    this.#draft = Object.freeze({ ...draft });
+    Object.freeze(this);
+  }
 
   public static create(
     theme: EmbedTheme = "neutral",
@@ -475,7 +644,7 @@ export class EmbedPlanBuilder {
     for (const entry of EMBED_THEMES) assertEmbedColor(palette[entry], `palette.${entry}`);
     return new EmbedPlanBuilder({
       theme,
-      locale: options.locale ?? "it",
+      locale: options.locale ?? "und",
       color: palette[theme],
       urlPolicy: freezePolicy(options.urlPolicy ?? DEFAULT_URL_POLICY),
       fields: Object.freeze([]),
@@ -503,7 +672,7 @@ export class EmbedPlanBuilder {
   }
 
   private next(changes: Partial<EmbedDraft>): EmbedPlanBuilder {
-    return new EmbedPlanBuilder({ ...this.draft, ...changes });
+    return new EmbedPlanBuilder({ ...this.#draft, ...changes });
   }
 
   public locale(locale: string): EmbedPlanBuilder {
@@ -518,7 +687,7 @@ export class EmbedPlanBuilder {
     context: Readonly<Record<string, DynamicColorSource>>,
     policy: DynamicColorPolicy,
   ): EmbedPlanBuilder {
-    return this.next({ color: resolveDynamicColor(this.draft.color, context, policy) });
+    return this.next({ color: resolveDynamicColor(this.#draft.color, context, policy) });
   }
 
   public title(title: string): EmbedPlanBuilder {
@@ -534,7 +703,14 @@ export class EmbedPlanBuilder {
   }
 
   public timestamp(timestamp: string | Date): EmbedPlanBuilder {
-    return this.next({ timestamp: timestamp instanceof Date ? timestamp.toISOString() : timestamp });
+    return this.next({
+      timestamp:
+        timestamp instanceof Date && Number.isFinite(timestamp.getTime())
+          ? timestamp.toISOString()
+          : timestamp instanceof Date
+            ? ""
+            : timestamp,
+    });
   }
 
   public author(author: EmbedAuthor): EmbedPlanBuilder {
@@ -555,16 +731,11 @@ export class EmbedPlanBuilder {
 
   public field(name: string, value: string, inline = false): EmbedPlanBuilder {
     return this.next({
-      fields: Object.freeze([...this.draft.fields, Object.freeze({ name, value, inline })]),
+      fields: Object.freeze([...this.#draft.fields, Object.freeze({ name, value, inline })]),
     });
   }
 
   public build(): EmbedPlan {
-    return validateDraft(this.draft);
+    return validateDraft(this.#draft);
   }
 }
-
-const MARKDOWN_CONTROL_CHARACTERS = /([\\`*_{}[\]()<>#+\-.!|~>])/g;
-
-export const escapeUntrustedEmbedText = (value: string): string =>
-  value.replace(MARKDOWN_CONTROL_CHARACTERS, "\\$1").replaceAll("@", "@\u200b");
