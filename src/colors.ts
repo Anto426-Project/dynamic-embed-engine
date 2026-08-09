@@ -130,6 +130,7 @@ const sortedByBrightness = (palette: readonly RgbColor[]): readonly RgbColor[] =
 const distinctColors = (
   palette: readonly RgbColor[],
   minimumDistance: number,
+  maximumCount: number,
 ): readonly RgbColor[] => {
   const sorted = sortedByBrightness(palette);
   const first = sorted[0];
@@ -138,6 +139,7 @@ const distinctColors = (
   for (const candidate of sorted.slice(1)) {
     if (selected.every((existing) => colorDistance(candidate, existing) >= minimumDistance)) {
       selected.push(candidate);
+      if (selected.length >= maximumCount) break;
     }
   }
   return Object.freeze(selected);
@@ -283,7 +285,7 @@ export const deriveDynamicColorProfile = (
     throw new RangeError("minimumDistance must be between 0 and 442.");
   }
 
-  const distinct = distinctColors(normalized, minimumDistance);
+  const distinct = distinctColors(normalized, minimumDistance, colorCount);
   const sorted = sortedByBrightness(distinct.length === 0 ? normalized : distinct);
   const darkest = sorted[0] as RgbColor;
   const lightest = sorted.at(-1) as RgbColor;

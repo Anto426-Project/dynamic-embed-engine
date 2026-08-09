@@ -8,6 +8,7 @@ import {
   calculateEmbedTextLength,
   deriveDynamicColorProfile,
   escapeUntrustedEmbedText,
+  validateEmbedPlan,
 } from "../src/index.js";
 
 describe("embed plan engine", () => {
@@ -77,6 +78,22 @@ describe("embed plan engine", () => {
     assert.equal(
       escapeUntrustedEmbedText("**@everyone** [click](url)"),
       "\\*\\*@\u200beveryone\\*\\* \\[click\\]\\(url\\)",
+    );
+  });
+
+  it("revalidates structural input and rejects accessor bypasses", () => {
+    const valid = EmbedPlanBuilder.info().description("safe").build();
+    assert.deepEqual(validateEmbedPlan({ ...valid }), valid);
+    const malicious = {
+      ...valid,
+      get description() {
+        return "x".repeat(50_000);
+      },
+    };
+    assert.throws(() => validateEmbedPlan(malicious), /accessor/);
+    assert.throws(
+      () => validateEmbedPlan({ ...valid, description: "x".repeat(50_000) }),
+      EmbedValidationError,
     );
   });
 });

@@ -59,6 +59,21 @@ describe("dynamic color engine", () => {
     assert.throws(() => deriveDynamicColorProfile([[1, 2, 999]]), /between 0 and 255/);
   });
 
+  it("bounds palette selection work to the requested color count", () => {
+    const samples = Array.from({ length: 10_000 }, (_, index) => [
+      index % 256,
+      (index * 17) % 256,
+      (index * 31) % 256,
+    ]);
+    const started = performance.now();
+    const profile = deriveDynamicColorProfile(samples, {
+      colorCount: 5,
+      minimumDistance: 0,
+    });
+    assert.equal(profile.palette.length, 5);
+    assert.ok(performance.now() - started < 1_000);
+  });
+
   it("selects only credential-free HTTPS sources", () => {
     assert.equal(
       firstDefinedHttpsSource([

@@ -346,6 +346,123 @@ const validateDraft = (draft: EmbedDraft): EmbedPlan => {
   return Object.freeze(candidate);
 };
 
+const dataRecord = (value: unknown, path: string): Record<string, unknown> => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path} must be a plain data object.`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${path} must be a plain data object.`);
+  }
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
+    if (descriptor.get !== undefined || descriptor.set !== undefined) {
+      throw new TypeError(`${path} cannot contain accessor properties.`);
+    }
+  }
+  return value as Record<string, unknown>;
+};
+
+const requiredString = (record: Record<string, unknown>, key: string, path: string): string => {
+  const value = record[key];
+  if (typeof value !== "string") throw new TypeError(`${path}.${key} must be a string.`);
+  return value;
+};
+
+const optionalString = (
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+): string | undefined => {
+  const value = record[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new TypeError(`${path}.${key} must be a string.`);
+  return value;
+};
+
+/**
+ * Reprojects an untrusted structural value into one closed, validated plan.
+ * Provider adapters call this even for TypeScript-typed input so JS callers,
+ * casts, getters and custom toJSON behavior cannot bypass engine limits.
+ */
+export const validateEmbedPlan = (input: unknown): EmbedPlan => {
+  const plan = dataRecord(input, "embed");
+  const themeValue = requiredString(plan, "theme", "embed");
+  if (!EMBED_THEMES.includes(themeValue as EmbedTheme)) {
+    throw new TypeError("embed.theme is invalid.");
+  }
+  const color = plan["color"];
+  if (typeof color !== "number") throw new TypeError("embed.color must be a number.");
+  const fieldsValue = plan["fields"];
+  if (!Array.isArray(fieldsValue)) throw new TypeError("embed.fields must be an array.");
+  const fields = fieldsValue.map((fieldValue, index): EmbedField => {
+    const field = dataRecord(fieldValue, `embed.fields[${index}]`);
+    if (typeof field["inline"] !== "boolean") {
+      throw new TypeError(`embed.fields[${index}].inline must be a boolean.`);
+    }
+    return Object.freeze({
+      name: requiredString(field, "name", `embed.fields[${index}]`),
+      value: requiredString(field, "value", `embed.fields[${index}]`),
+      inline: field["inline"],
+    });
+  });
+  const authorValue = plan["author"];
+  const author =
+    authorValue === undefined
+      ? undefined
+      : (() => {
+          const value = dataRecord(authorValue, "embed.author");
+          return Object.freeze({
+            name: requiredString(value, "name", "embed.author"),
+            ...(optionalString(value, "url", "embed.author") === undefined
+              ? {}
+              : { url: optionalString(value, "url", "embed.author") as string }),
+            ...(optionalString(value, "iconUrl", "embed.author") === undefined
+              ? {}
+              : { iconUrl: optionalString(value, "iconUrl", "embed.author") as string }),
+          });
+        })();
+  const footerValue = plan["footer"];
+  const footer =
+    footerValue === undefined
+      ? undefined
+      : (() => {
+          const value = dataRecord(footerValue, "embed.footer");
+          return Object.freeze({
+            text: requiredString(value, "text", "embed.footer"),
+            ...(optionalString(value, "iconUrl", "embed.footer") === undefined
+              ? {}
+              : { iconUrl: optionalString(value, "iconUrl", "embed.footer") as string }),
+          });
+        })();
+  return validateDraft({
+    theme: themeValue as EmbedTheme,
+    locale: requiredString(plan, "locale", "embed"),
+    color,
+    urlPolicy: DEFAULT_URL_POLICY,
+    ...(optionalString(plan, "title", "embed") === undefined
+      ? {}
+      : { title: optionalString(plan, "title", "embed") as string }),
+    ...(optionalString(plan, "description", "embed") === undefined
+      ? {}
+      : { description: optionalString(plan, "description", "embed") as string }),
+    ...(optionalString(plan, "url", "embed") === undefined
+      ? {}
+      : { url: optionalString(plan, "url", "embed") as string }),
+    ...(optionalString(plan, "timestamp", "embed") === undefined
+      ? {}
+      : { timestamp: optionalString(plan, "timestamp", "embed") as string }),
+    ...(author === undefined ? {} : { author }),
+    ...(footer === undefined ? {} : { footer }),
+    ...(optionalString(plan, "thumbnailUrl", "embed") === undefined
+      ? {}
+      : { thumbnailUrl: optionalString(plan, "thumbnailUrl", "embed") as string }),
+    ...(optionalString(plan, "imageUrl", "embed") === undefined
+      ? {}
+      : { imageUrl: optionalString(plan, "imageUrl", "embed") as string }),
+    fields: Object.freeze(fields),
+  });
+};
+
 export class EmbedPlanBuilder {
   private constructor(private readonly draft: EmbedDraft) {}
 
