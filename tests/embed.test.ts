@@ -62,6 +62,12 @@ describe("embed plan engine", () => {
       "https://cdn.example.test/image.png",
     );
     assert.equal(
+      EmbedPlanBuilder.info(options)
+        .image("attachment://welcome-member.png")
+        .build().imageUrl,
+      "attachment://welcome-member.png",
+    );
+    assert.equal(
       EmbedPlanBuilder.info({ urlPolicy: { allowedHosts: ["BÜCHER.Example"] } })
         .image("https://BÜCHER.Example/a b")
         .build().imageUrl,

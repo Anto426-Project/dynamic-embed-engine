@@ -253,11 +253,14 @@ const normalizeUrl = (
     return undefined;
   }
   const normalizedHost = parsed.hostname.toLowerCase();
+  const isAttachment =
+    parsed.protocol === "attachment:" &&
+    (path === "imageUrl" || path === "thumbnailUrl");
   const allowed =
-    parsed.protocol === "https:" &&
+    (parsed.protocol === "https:" || isAttachment) &&
     parsed.username.length === 0 &&
     parsed.password.length === 0 &&
-    (policy.allowedHosts === undefined || policy.allowedHosts.includes(normalizedHost));
+    (isAttachment || policy.allowedHosts === undefined || policy.allowedHosts.includes(normalizedHost));
   if (!allowed) {
     issues.push({
       code: "EMBED_URL_NOT_ALLOWED",
